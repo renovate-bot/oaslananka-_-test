@@ -125,22 +125,9 @@ jobs:
             -f ref="refs/heads/${BRANCH}" \
             -f sha="${BASE_SHA}" >/dev/null
 
-          TMP_WORKFLOW="$(mktemp)"
-          cat > "${TMP_WORKFLOW}" <<'EOF'
-name: repo-ops-smoke-temp
-on:
-  workflow_dispatch:
-permissions:
-  contents: read
-jobs:
-  noop:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 1
-    steps:
-      - run: 'true'
-EOF
+          TEMP_WORKFLOW_CONTENT=$'name: repo-ops-smoke-temp\non:\n  workflow_dispatch:\npermissions:\n  contents: read\njobs:\n  noop:\n    runs-on: ubuntu-24.04\n    timeout-minutes: 1\n    steps:\n      - run: true\n'
 
-          CONTENT="$(base64 -w0 "${TMP_WORKFLOW}")"
+          CONTENT="$(printf '%s' "${TEMP_WORKFLOW_CONTENT}" | base64 -w0)"
 
           api PUT "repos/${REPO}/contents/.github/workflows/__repo_ops_smoke_temp.yml" \
             -f message="ci: smoke-test workflow write permission" \

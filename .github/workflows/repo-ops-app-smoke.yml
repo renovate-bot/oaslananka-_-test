@@ -1,0 +1,173 @@
+name: Repo Ops App Smoke Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      write_tests:
+        description: Run reversible write tests
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repo-ops-app-smoke-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Create GitHub App token
+        id: app
+        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3
+        with:
+          client-id: ${{ vars.REPO_OPS_APP_CLIENT_ID }}
+          private-key: ${{ secrets.REPO_OPS_APP_PRIVATE_KEY }}
+          owner: oaslananka-lab
+          repositories: test
+          permission-actions: write
+          permission-administration: write
+          permission-checks: write
+          permission-code-scanning-alerts: write
+          permission-commit-statuses: write
+          permission-contents: write
+          permission-dependabot-alerts: write
+          permission-issues: write
+          permission-pull-requests: write
+          permission-secret-scanning-alerts: write
+          permission-secrets: write
+          permission-variables: write
+          permission-workflows: write
+
+      - name: Smoke test permissions
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          REPO: oaslananka-lab/test
+          API_VERSION: "2026-03-10"
+          WRITE_TESTS: ${{ inputs.write_tests }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          api() {
+            gh api --method "$1" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: ${API_VERSION}" \
+              "${@:2}"
+          }
+
+          echo "### Repo Ops App Smoke Test" >> "$GITHUB_STEP_SUMMARY"
+          echo "- repo: ${REPO}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- app_slug: ${{ steps.app.outputs.app-slug }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- installation_id: ${{ steps.app.outputs.installation-id }}" >> "$GITHUB_STEP_SUMMARY"
+
+          DEFAULT_BRANCH="$(api GET "repos/${REPO}" --jq .default_branch)"
+          BASE_SHA="$(api GET "repos/${REPO}/git/ref/heads/${DEFAULT_BRANCH}" --jq .object.sha)"
+
+          echo "[1/8] repo read"
+          api GET "installation/repositories?per_page=100" --jq '.repositories[].full_name' | grep -Fx "${REPO}" >/dev/null
+
+          echo "[2/8] repo operations read"
+          api GET "repos/${REPO}/actions/permissions" >/dev/null
+          api GET "repos/${REPO}/actions/permissions/workflow" >/dev/null
+          api GET "repos/${REPO}/actions/secrets" >/dev/null
+          api GET "repos/${REPO}/actions/variables" >/dev/null
+          api GET "repos/${REPO}/environments" >/dev/null
+
+          echo "[3/8] rules/protection read"
+          api GET "repos/${REPO}/rulesets" -F includes_parents=true -F per_page=100 >/dev/null || true
+          api GET "repos/${REPO}/branches/${DEFAULT_BRANCH}/protection" >/dev/null || true
+
+          echo "[4/8] security endpoints read"
+          for endpoint in code-scanning/alerts dependabot/alerts secret-scanning/alerts; do
+            api GET "repos/${REPO}/${endpoint}" -F state=open -F per_page=1 >/dev/null || true
+          done
+
+          if [[ "${WRITE_TESTS}" != "true" ]]; then
+            echo "read-only smoke passed" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          echo "[5/8] status/check-run write"
+          api POST "repos/${REPO}/statuses/${BASE_SHA}" \
+            -f state=success \
+            -f context="repo-ops/app-smoke" \
+            -f description="GitHub App status write works" >/dev/null
+
+          api POST "repos/${REPO}/check-runs" \
+            -f name="repo-ops app smoke" \
+            -f head_sha="${BASE_SHA}" \
+            -f status=completed \
+            -f conclusion=success \
+            -f "output[title]=Repo Ops App Smoke" \
+            -f "output[summary]=Checks write permission works." >/dev/null
+
+          echo "[6/8] label create/delete"
+          LABEL="repo-ops-smoke-${GITHUB_RUN_ID}"
+          api POST "repos/${REPO}/labels" \
+            -f name="${LABEL}" \
+            -f color="6e7781" \
+            -f description="temporary GitHub App smoke test" >/dev/null
+          api DELETE "repos/${REPO}/labels/${LABEL}" >/dev/null
+
+          echo "[7/8] variable/secret create/delete"
+          gh variable set __REPO_OPS_SMOKE --repo "${REPO}" --body "ok-${GITHUB_RUN_ID}"
+          gh variable delete __REPO_OPS_SMOKE --repo "${REPO}" --yes
+
+          printf 'ok-%s' "${GITHUB_RUN_ID}" | gh secret set __REPO_OPS_SMOKE_SECRET --repo "${REPO}"
+          gh secret delete __REPO_OPS_SMOKE_SECRET --repo "${REPO}" --yes
+
+          echo "[8/8] branch + workflow write + draft PR + cleanup"
+          BRANCH="repo-ops-smoke-${GITHUB_RUN_ID}"
+
+          cleanup_branch() {
+            api DELETE "repos/${REPO}/git/refs/heads/${BRANCH}" >/dev/null 2>&1 || true
+          }
+          trap cleanup_branch EXIT
+
+          api POST "repos/${REPO}/git/refs" \
+            -f ref="refs/heads/${BRANCH}" \
+            -f sha="${BASE_SHA}" >/dev/null
+
+          TMP_WORKFLOW="$(mktemp)"
+          cat > "${TMP_WORKFLOW}" <<'EOF'
+name: repo-ops-smoke-temp
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  noop:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 1
+    steps:
+      - run: 'true'
+EOF
+
+          CONTENT="$(base64 -w0 "${TMP_WORKFLOW}")"
+
+          api PUT "repos/${REPO}/contents/.github/workflows/__repo_ops_smoke_temp.yml" \
+            -f message="ci: smoke-test workflow write permission" \
+            -f content="${CONTENT}" \
+            -f branch="${BRANCH}" >/dev/null
+
+          PR_URL="$(gh pr create \
+            --repo "${REPO}" \
+            --head "${BRANCH}" \
+            --base "${DEFAULT_BRANCH}" \
+            --draft \
+            --title "ci: repo ops app smoke test" \
+            --body "Temporary GitHub App smoke test. This PR is closed automatically.")"
+
+          gh pr close "${PR_URL}" \
+            --repo "${REPO}" \
+            --delete-branch \
+            --comment "Smoke test completed; closing temporary PR."
+
+          trap - EXIT
+          echo "Smoke test passed." >> "$GITHUB_STEP_SUMMARY"

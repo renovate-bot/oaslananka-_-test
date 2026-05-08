@@ -108,10 +108,10 @@ jobs:
 
           echo "[7/8] variable/secret create/delete"
           gh variable set __REPO_OPS_SMOKE --repo "${REPO}" --body "ok-${GITHUB_RUN_ID}"
-          gh variable delete __REPO_OPS_SMOKE --repo "${REPO}" --yes
+          api DELETE "repos/${REPO}/actions/variables/__REPO_OPS_SMOKE" >/dev/null
 
           printf 'ok-%s' "${GITHUB_RUN_ID}" | gh secret set __REPO_OPS_SMOKE_SECRET --repo "${REPO}"
-          gh secret delete __REPO_OPS_SMOKE_SECRET --repo "${REPO}" --yes
+          api DELETE "repos/${REPO}/actions/secrets/__REPO_OPS_SMOKE_SECRET" >/dev/null
 
           echo "[8/8] branch + workflow file write + draft PR + cleanup"
           BRANCH="repo-ops-smoke-${GITHUB_RUN_ID}"
@@ -149,3 +149,4 @@ jobs:
 
           trap - EXIT
           echo "Smoke test passed." >> "$GITHUB_STEP_SUMMARY"
+

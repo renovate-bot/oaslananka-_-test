@@ -5,7 +5,10 @@ on:
 
 permissions:
   contents: read
-  security-events: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   cifence:
@@ -14,13 +17,15 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v6
-        with:
-          go-version: "1.26.3"
-          cache: false
-
-      - uses: oaslananka/cifence@v0.1.0
+      - uses: oaslananka/cifence@v0.1.1
         with:
           mode: warn
           sarif: "true"
           upload-sarif: "false"
+
+      - name: Verify CIFence reports
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s cifence-results/cifence.json
+          test -s cifence-results/cifence.sarif
